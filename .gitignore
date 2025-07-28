@@ -1,0 +1,46 @@
+# Node.js
+node_modules/
+
+# Python
+env/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment files
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# VSCode
+.vscode/
+
+# Next.js build output
+.next/
+
+# Other
+*.sqlite3
+*.db
+
+# Ignore frontend build
+frontend/.next/
+
+# Ignore data
+*.pdf
+*.docx
+*.xlsx
+*.csv
+
+# Ignore test coverage
+coverage/
+
+# Ignore temp files
+*.swp
+*.swo
