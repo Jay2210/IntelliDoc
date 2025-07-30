@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from typing import List, Optional
 from fastapi.responses import JSONResponse
 from uuid import uuid4
 from pathlib import Path
@@ -7,7 +8,9 @@ from app.schemas import (
     QueryRequest,
     QueryResponse,
     GeneralResponse,
-    QueryLog
+    QueryLog,
+    MultiQuestionRequest,
+    AnswerResponse
 )
 from app.llm import (
     structure_query,
@@ -23,12 +26,16 @@ from app.pinecone_client import get_index
 from app.utils import get_logger
 from fastapi.middleware.cors import CORSMiddleware
 
+import asyncio
+import json
+from fastapi.concurrency import run_in_threadpool
+
 app = FastAPI(title="HackRx Policy Q&R")
 logger = get_logger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Allows your React app to connect
+    allow_origins=["*"],  # Allows your React app to connect
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -82,7 +89,7 @@ async def _fallback(req: QueryRequest, insurer: str):
 
     contexts = retrieve(req.query, top_k=10, insurer=insurer)
     context_str = "\n---\n".join(
-        f"{c['source']} ({c['id']}): {c['text'][:200]}…"
+        f"{c['source']} ({c['id']}): {c['text'][:500]}…"
         for c in contexts
     )
 
@@ -150,3 +157,90 @@ async def ingest_endpoint():
     from scripts.index_documents import run as index_run
     count = index_run()
     return {"indexed_chunks": count}
+
+@app.post(
+    "/run",
+    response_model=AnswerResponse,
+    summary="Run a multi-question query on a single document",
+)
+async def run(
+    file: UploadFile = File(...),
+    questions: List[str] = Form(...),
+):
+    request_id = uuid4().hex
+    filename = file.filename
+
+    # 1) Save the file locally
+    docs_dir = Path("data/docs")
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    local_path = docs_dir / f"{request_id}-{filename}"
+    contents = await file.read()
+    local_path.write_bytes(contents)
+    logger.info(f"[{request_id}] saved upload to {local_path}")
+
+    # 2) Load, chunk, embed, and upsert *with* a custom 'insurer' tag = our request_id
+    text = load_document(local_path)
+    chunks = chunk_text(text)
+    vectors = embed_texts(chunks)
+    idx = get_index()
+    batch = [
+        (
+            f"{request_id}-{i}",
+            vec,
+            {
+                "source": filename,
+                "insurer": request_id,     # <— tag every chunk with this run’s ID
+                "text": chunk,
+            },
+        )
+        for i, (vec, chunk) in enumerate(zip(vectors, chunks))
+    ]
+    idx.upsert(vectors=batch)
+    logger.info(f"[{request_id}] upserted {len(batch)} chunks")
+
+    # 3) Normalize the questions field (JSON-array string, comma-sep, or multiple -F)
+    raw = questions[0].strip() if len(questions) == 1 else None
+    if len(questions) == 1 and raw and raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and all(isinstance(q, str) for q in parsed):
+                qs = parsed
+            else:
+                qs = questions
+        except json.JSONDecodeError:
+            qs = questions
+    elif len(questions) == 1 and raw and "," in raw:
+        qs = [q.strip() for q in raw.split(",") if q.strip()]
+    else:
+        qs = questions
+
+    if not qs:
+        raise HTTPException(400, detail="No valid questions provided")
+
+    # 4) Answer each question in parallel (max 2 concurrent), but *filter* by our request_id
+    sem = asyncio.Semaphore(2)
+
+    async def answer_one(q: str) -> str:
+        async with sem:
+            # only retrieve chunks where metadata.insurer == request_id
+            ctxs = retrieve(q, top_k=50, insurer=request_id)
+            context_str = "\n---\n".join(
+                f"{c['source']}: {c['text'][:200]}…" for c in ctxs
+            )
+            prompt = (
+                "You are an expert insurance-policy analyst.\n"
+            "Using **only** the context snippets below, answer the question in **complete, audit-ready sentences**.\n"
+            "Include durations, numeric values, conditions, and any limits exactly as they appear.\n\n"
+            f"Context:\n{context_str}\n\n"
+            f"Question: {q}\n\nAnswer:"
+            )
+            try:
+                return await run_in_threadpool(lambda: chat_general(prompt))
+            except Exception as e:
+                logger.error(f"[{request_id}] error on “{q}”: {e}")
+                return f"Error answering '{q}': {e}"
+
+    tasks = [answer_one(q) for q in qs]
+    answers = await asyncio.gather(*tasks)
+
+    return AnswerResponse(answers=answers)
