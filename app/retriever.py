@@ -6,7 +6,7 @@ from app.pinecone_client import index
 
 def retrieve(
     query: str,
-    top_k: int = 10,
+    top_k: int = 50,
     insurer: str = None
 ) -> List[Dict]:
     # 1) embed
@@ -27,7 +27,7 @@ def retrieve(
         include_metadata=True,
         filter=pinecone_filter or None,
     )
-
+    print(f"Insurer: {insurer}, top_k: {top_k}, results: {len(resp.get('matches', []))}")
     # 4) normalize
     out = []
     for m in resp.get("matches", []):

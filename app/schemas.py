@@ -31,3 +31,10 @@ class QueryLog(BaseModel):
     request_id: str
     query: str
     response: dict  # could be QueryResponse or GeneralResponse
+
+class MultiQuestionRequest(BaseModel):
+    documents: str
+    questions: List[str]
+    
+class AnswerResponse(BaseModel):
+    answers: List[str]

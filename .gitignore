@@ -31,6 +31,7 @@ __pycache__/
 
 # Ignore frontend build
 frontend/.next/
+frontend/node_modules
 
 # Ignore data
 *.pdf

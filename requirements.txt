@@ -13,3 +13,6 @@ pinecone[grpc]
 boto3
 pydantic-settings
 python-multipart
+pymupdf
+pdfplumber
+httpx
