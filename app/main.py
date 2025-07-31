@@ -16,7 +16,7 @@ from schemas import (
     MultiQuestionRequest,
     AnswerResponse
 )
-from app.llm import (
+from llm import (
     structure_query,
     synthesize_answer,
     chat_general
