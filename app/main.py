@@ -8,7 +8,7 @@ from fastapi import Depends
 import httpx
 
 
-from app.schemas import (
+from schemas import (
     QueryRequest,
     QueryResponse,
     GeneralResponse,
@@ -21,13 +21,13 @@ from app.llm import (
     synthesize_answer,
     chat_general
 )
-from app.retriever import retrieve
-from app.s3_storage import save_json
-from app.docs_loader import load_document
-from app.chunking import chunk_text
-from app.embeddings import embed_texts
-from app.pinecone_client import get_index
-from app.utils import get_logger
+from retriever import retrieve
+from s3_storage import save_json
+from docs_loader import load_document
+from chunking import chunk_text
+from embeddings import embed_texts
+from pinecone_client import get_index
+from utils import get_logger
 from fastapi.middleware.cors import CORSMiddleware
 
 import asyncio
