@@ -1,5 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import List, Optional
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from typing import List, Optional
 from fastapi.responses import JSONResponse
 from uuid import uuid4
 from pathlib import Path
@@ -8,6 +10,9 @@ from app.schemas import (
     QueryRequest,
     QueryResponse,
     GeneralResponse,
+    QueryLog,
+    MultiQuestionRequest,
+    AnswerResponse
     QueryLog,
     MultiQuestionRequest,
     AnswerResponse
@@ -30,12 +35,17 @@ import asyncio
 import json
 from fastapi.concurrency import run_in_threadpool
 
+import asyncio
+import json
+from fastapi.concurrency import run_in_threadpool
+
 app = FastAPI(title="HackRx Policy Q&R")
 logger = get_logger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allows your React app to connect
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,25 +59,19 @@ async def query_endpoint(req: QueryRequest):
     - Otherwise, fall back to general Q&A chat with Pinecone context.
     """
     req.request_id = req.request_id or uuid4().hex
-    insurer = req.insurer  # may be None
+    insurer = req.insurer
 
-    # 1) Parse into structured fields
     params = structure_query(req.query)
 
-    # 2) If more than 2 of the 4 fields are missing, fallback
     missing = sum(1 for v in params.values() if not v)
     if missing > 2:
         return await _fallback(req, insurer)
-
-    # 3) Retrieve clauses scoped by insurer if provided
     combined = " ".join(str(v) for v in params.values() if v)
     clauses  = retrieve(combined, top_k=5, insurer=insurer)
 
-    # 4) If we parsed enough fields but found zero clauses, still fallback
     if not clauses:
         return await _fallback(req, insurer)
 
-    # 5) Structured synthesis
     structured = synthesize_answer(req.query, clauses)
     response   = QueryResponse(**structured)
 
@@ -87,8 +91,9 @@ async def _fallback(req: QueryRequest, insurer: str):
     """
     logger.info(f"[{req.request_id}] falling back to general chat")
 
-    contexts = retrieve(req.query, top_k=10, insurer=insurer)
+    contexts = retrieve(req.query, top_k=50, insurer=insurer)
     context_str = "\n---\n".join(
+        f"{c['source']} ({c['id']}): {c['text'][:500]}…"
         f"{c['source']} ({c['id']}): {c['text'][:500]}…"
         for c in contexts
     )
@@ -234,6 +239,106 @@ async def run(
             f"Context:\n{context_str}\n\n"
             f"Question: {q}\n\nAnswer:"
             )
+            try:
+                return await run_in_threadpool(lambda: chat_general(prompt))
+            except Exception as e:
+                logger.error(f"[{request_id}] error on “{q}”: {e}")
+                return f"Error answering '{q}': {e}"
+
+    tasks = [answer_one(q) for q in qs]
+    answers = await asyncio.gather(*tasks)
+
+    return AnswerResponse(answers=answers)
+@app.post(
+    "/run",
+    response_model=AnswerResponse,
+    summary="Run a multi-question query on a single document",
+)
+async def run(
+    file: UploadFile = File(...),
+    questions: List[str] = Form(...),
+):
+    request_id = uuid4().hex
+    filename = file.filename
+
+    # 1) Save the file locally
+    docs_dir = Path("data/docs")
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    local_path = docs_dir / f"{request_id}-{filename}"
+    contents = await file.read()
+    local_path.write_bytes(contents)
+    logger.info(f"[{request_id}] saved upload to {local_path}")
+
+    text = load_document(local_path)
+    chunks = chunk_text(text)
+    vectors = embed_texts(chunks)
+    idx = get_index()
+    batch = [
+        (
+            f"{request_id}-{i}",
+            vec,
+            {
+                "source": filename,
+                "insurer": request_id,     
+                "text": chunk,
+            },
+        )
+        for i, (vec, chunk) in enumerate(zip(vectors, chunks))
+    ]
+    idx.upsert(vectors=batch)
+    logger.info(f"[{request_id}] upserted {len(batch)} chunks")
+
+    raw = questions[0].strip() if len(questions) == 1 else None
+    if len(questions) == 1 and raw and raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and all(isinstance(q, str) for q in parsed):
+                qs = parsed
+            else:
+                qs = questions
+        except json.JSONDecodeError:
+            qs = questions
+    elif len(questions) == 1 and raw and "," in raw:
+        qs = [q.strip() for q in raw.split(",") if q.strip()]
+    else:
+        qs = questions
+
+    if not qs:
+        raise HTTPException(400, detail="No valid questions provided")
+
+    sem = asyncio.Semaphore(2)
+
+    async def answer_one(q: str) -> str:
+        async with sem:
+
+            ctxs = retrieve(q, top_k=10, insurer=request_id)
+            context_str = "\n---\n".join(
+                f"{c['source']}: {c['text']}…" for c in ctxs
+            )
+            prompt = f"""
+You are a meticulous and detail-oriented insurance policy analyst. Your task is to answer the user's question with maximum precision and completeness, based *only* on the provided context snippets.
+
+Follow these instructions exactly:
+1.  **Analyze the Context:** Carefully read all the provided context snippets to find the most relevant clauses that answer the user's question.
+2.  **Extract All Details:** From the relevant clauses, you must extract every key detail. Pay close attention to the following, and list them if they are present:
+    * **Conditions and Eligibility:** What are the specific requirements, waiting periods, age limits, or pre-requisites?
+    * **Limits and Sub-limits:** Are there any monetary caps, percentage-based limits, or limits on frequency (e.g., "up to 2 deliveries")?
+    * **Specific Criteria:** For definitions (like "Hospital"), what are all the specific criteria listed (e.g., bed count, staff requirements, facilities)?
+    * **Type of Coverage:** Is the coverage for "in-patient," "out-patient," "day care," etc.?
+3.  **Synthesize the Answer:**
+    * Start with a direct, one-sentence answer (e.g., "Yes, this is covered," "No, this is excluded," "The waiting period is X months.").
+    * Answer should be at max 2 lines. 1st Line should have the answer yes/no and the duration or any other important detail. 2nd Line should have details if necessary.
+    * Do no formatting, just plain text. 
+4.  **Handle Missing Information:** If a specific detail is not mentioned in the context, you must explicitly state that (e.g., "* The context does not specify the maximum number of deliveries.").
+
+---
+CONTEXT:
+{context_str}
+---
+QUESTION: {q}
+
+ANSWER:
+"""
             try:
                 return await run_in_threadpool(lambda: chat_general(prompt))
             except Exception as e:
