@@ -3,6 +3,10 @@ from typing import List, Optional
 from fastapi.responses import JSONResponse
 from uuid import uuid4
 from pathlib import Path
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends
+import httpx
+
 
 from app.schemas import (
     QueryRequest,
@@ -32,6 +36,16 @@ from fastapi.concurrency import run_in_threadpool
 
 app = FastAPI(title="HackRx Policy Q&R")
 logger = get_logger(__name__)
+
+bearer_scheme = HTTPBearer()
+
+def require_api_key(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+):
+    token = credentials.credentials
+    if token != "9209d3d55da6a5973a019141c4ca292676a7cbf5d45890572c3f88b9c8bb911d":
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -158,6 +172,7 @@ async def ingest_endpoint():
     "/run",
     response_model=AnswerResponse,
     summary="Run a multi-question query on a single document",
+    dependencies=[Depends(require_api_key)]
 )
 async def run(
     file: UploadFile = File(...),
@@ -244,6 +259,7 @@ async def run(
     "/run",
     response_model=AnswerResponse,
     summary="Run a multi-question query on a single document",
+    dependencies=[Depends(require_api_key)]
 )
 async def run(
     file: UploadFile = File(...),
