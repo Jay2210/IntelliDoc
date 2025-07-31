@@ -49,8 +49,7 @@ def require_api_key(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows your React app to connect
-    allow_origins=["*"],  
+    allow_origins=["*"],  # Allows your React app to connect  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
