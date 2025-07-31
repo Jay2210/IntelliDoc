@@ -1,7 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import List, Optional
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from typing import List, Optional
 from fastapi.responses import JSONResponse
 from uuid import uuid4
 from pathlib import Path
@@ -10,9 +8,6 @@ from app.schemas import (
     QueryRequest,
     QueryResponse,
     GeneralResponse,
-    QueryLog,
-    MultiQuestionRequest,
-    AnswerResponse
     QueryLog,
     MultiQuestionRequest,
     AnswerResponse
@@ -30,10 +25,6 @@ from app.embeddings import embed_texts
 from app.pinecone_client import get_index
 from app.utils import get_logger
 from fastapi.middleware.cors import CORSMiddleware
-
-import asyncio
-import json
-from fastapi.concurrency import run_in_threadpool
 
 import asyncio
 import json
