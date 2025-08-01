@@ -1,4 +1,3 @@
-# app/main.py
 import json
 import asyncio
 from uuid import uuid4
@@ -39,7 +38,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ────────── Bearer auth ─────────────────────────────────────────────────────────
 BEARER_TOKEN = "9209d3d55da6a5973a019141c4ca292676a7cbf5d45890572c3f88b9c8bb911d"
 bearer_scheme = HTTPBearer()
 
@@ -51,10 +49,6 @@ def verify_bearer_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing bearer token"
         )
-
-# ─── your other endpoints (query, upload, ingest) remain unchanged ─────────────
-
-# ────────── Improved /hackrx/run ────────────────────────────────────────────────
 @app.post(
     "/hackrx/run",
     response_model=AnswerResponse,
@@ -70,7 +64,6 @@ async def run(req: MultiQuestionRequest = Body(
 )):
     request_id = uuid4().hex
 
-    # 1) Download PDF (async)
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.get(req.documents, follow_redirects=True)
@@ -81,7 +74,6 @@ async def run(req: MultiQuestionRequest = Body(
         logger.error(f"[{request_id}] download error: {e}")
         raise HTTPException(400, f"Failed to fetch document: {e}")
 
-    # 2) Upload PDF to S3 (offloaded)
     s3_key = f"documents/{request_id}.pdf"
     try:
         await asyncio.to_thread(_bucket.put_object, Key=s3_key, Body=pdf_bytes)
@@ -90,14 +82,12 @@ async def run(req: MultiQuestionRequest = Body(
         logger.error(f"[{request_id}] S3 upload error: {e}")
         raise HTTPException(500, "Failed to push PDF to S3")
 
-    # 3) Extract & chunk (offloaded)
     with NamedTemporaryFile(suffix=".pdf") as tmpf:
         tmpf.write(pdf_bytes)
         tmpf.flush()
         text   = await asyncio.to_thread(load_document, Path(tmpf.name))
         chunks = await asyncio.to_thread(chunk_text, text)
 
-    # 4) Embed & upsert to Pinecone (offloaded)
     vectors = await asyncio.to_thread(embed_texts, chunks)
     idx     = get_index()
     batch   = [
@@ -107,12 +97,10 @@ async def run(req: MultiQuestionRequest = Body(
     await asyncio.to_thread(idx.upsert, vectors=batch)
     logger.info(f"[{request_id}] upserted {len(batch)} chunks")
 
-    # 5) Answer each question (2 concurrent LLM calls)
     sem = asyncio.Semaphore(2)
 
     async def answer_one(q: str) -> str:
         async with sem:
-            # retrieve (offload if blocking)
             ctxs = await asyncio.to_thread(retrieve, q, 10, request_id)
             context_str = "\n---\n".join(f"{c['source']}: {c['text']}…" for c in ctxs)
 
@@ -140,7 +128,6 @@ QUESTION: {q}
 
 ANSWER:
 """
-            # LLM call (offloaded)
             return await asyncio.to_thread(chat_general, prompt)
 
     answers = await asyncio.gather(*(answer_one(q) for q in req.questions))
