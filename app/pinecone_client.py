@@ -9,7 +9,7 @@ def get_index():
         pc.create_index(
             name=INDEX_NAME,
             vector_type="dense",
-            dimension=768,
+            dimension=1024,
             metric="cosine",
             spec=ServerlessSpec(cloud="aws", region=settings.PINECONE_ENV),
             deletion_protection="disabled",

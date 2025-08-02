@@ -3,6 +3,7 @@ import asyncio
 from uuid import uuid4
 from tempfile import NamedTemporaryFile
 from pathlib import Path
+import time
 
 import httpx
 from fastapi import (
@@ -90,6 +91,14 @@ async def run(req: MultiQuestionRequest = Body(
 
     vectors = await asyncio.to_thread(embed_texts, chunks)
     idx     = get_index()
+    
+    try:
+        initial_stats = await asyncio.to_thread(idx.describe_index_stats)
+        initial_vector_count = initial_stats.get("total_vector_count", 0)
+    except Exception as e:
+        logger.warning(f"Could not get initial index stats: {e}. Defaulting count to 0.")
+        initial_vector_count = 0
+    
     batch   = [
         (f"{request_id}-{i}", vec, {"source": s3_key, "insurer": request_id, "text": chunk})
         for i, (vec, chunk) in enumerate(zip(vectors, chunks))
@@ -104,31 +113,32 @@ async def run(req: MultiQuestionRequest = Body(
             ctxs = await asyncio.to_thread(retrieve, q, 10, request_id)
             context_str = "\n---\n".join(f"{c['source']}: {c['text']}…" for c in ctxs)
 
-            prompt = f"""
-You are a meticulous and detail-oriented insurance policy analyst. Your task is to answer the user's question with maximum precision and completeness, based *only* on the provided context snippets.
+        prompt = f"""
+                You are a meticulous and detail-oriented insurance policy analyst. Your task is to answer the user's question with maximum precision and completeness, based *only* on the provided context snippets.
 
-Follow these instructions exactly:
-1.  **Analyze the Context:** Carefully read all the provided context snippets to find the most relevant clauses that answer the user's question.
-2.  **Extract All Details:** From the relevant clauses, you must extract every key detail. Pay close attention to the following, and list them if they are present:
-    * **Conditions and Eligibility:** What are the specific requirements, waiting periods, age limits, or pre-requisites?
-    * **Limits and Sub-limits:** Are there any monetary caps, percentage-based limits, or limits on frequency (e.g., "up to 2 deliveries")?
-    * **Specific Criteria:** For definitions (like "Hospital"), what are all the specific criteria listed (e.g., bed count, staff requirements, facilities)?
-    * **Type of Coverage:** Is the coverage for "in-patient," "out-patient," "day care," etc.?
-3.  **Synthesize the Answer:**
-    * Start with a direct, one-sentence answer (e.g., "Yes, this is covered," "No, this is excluded," "The waiting period is X months.").
-    * Answer should be at max 2 lines. 1st Line should have the answer yes/no and the duration or any other important detail. 2nd Line should have details if necessary.
-    * Do no formatting, just plain text. 
-4.  **Handle Missing Information:** If a specific detail is not mentioned in the context, you must explicitly state that (e.g., "* The context does not specify the maximum number of deliveries.").
+                Follow these instructions exactly:
+                1.  **Analyze the Context:** Carefully read all the provided context snippets to find the most relevant clauses that answer the user's question.
+                2.  **Extract All Details:** From the relevant clauses, you must extract every key detail. Pay close attention to the following, and list them if they are present:
+                * **Conditions and Eligibility:** What are the specific requirements, waiting periods, age limits, or pre-requisites?
+                * **Limits and Sub-limits:** Are there any monetary caps, percentage-based limits, or limits on frequency (e.g., "up to 2 deliveries")?
+                * **Specific Criteria:** For definitions (like "Hospital"), what are all the specific criteria listed (e.g., bed count, staff requirements, facilities)?
+                * **Type of Coverage:** Is the coverage for "in-patient," "out-patient," "day care," etc.?
+                3.  **Synthesize the Answer:**
+                * Start with a direct, one-sentence answer (e.g., "Yes, this is covered," "No, this is excluded," "The waiting period is X months.").
+                * Answer should be at max 2 lines. 1st Line should have the answer yes/no and the duration or any other important detail. 2nd Line should have details if necessary.
+                * Do no formatting, just plain text. Keep the answer concise and to the point. The answer should be short and to the point, ideally no more than 2 lines.
+                * If the answer is "No," explain why it is not covered or what the limitations
+                4.  **Handle Missing Information:** If a specific detail is not mentioned in the context, you must explicitly state that (e.g., "* The context does not specify the maximum number of deliveries.").
 
----
-CONTEXT:
-{context_str}
----
-QUESTION: {q}
+                ---
+                CONTEXT:
+                {context_str}
+                ---
+                QUESTION: {q}
 
 ANSWER:
 """
-            return await asyncio.to_thread(chat_general, prompt)
+        return await asyncio.to_thread(chat_general, prompt)
 
     answers = await asyncio.gather(*(answer_one(q) for q in req.questions))
     return JSONResponse(

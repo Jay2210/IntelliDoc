@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     PINECONE_ENV: str
     S3_BUCKET: str
     AWS_REGION: str
+    JINA_API_KEY: str
 
     model_config = SettingsConfigDict(env_file=".env")
 

@@ -1,15 +1,38 @@
+import os
+import requests
 from typing import List
-from sentence_transformers import SentenceTransformer
+from app.config import settings
 
-# Load a SentenceTransformer model; returns 1536-dim embeddings by default
-_model = SentenceTransformer("all-mpnet-base-v2")
+JINA_API_KEY = settings.JINA_API_KEY
+if not JINA_API_KEY:
+    raise RuntimeError("Missing JINA_API_KEY environment variable")
+JINA_URL     = "https://api.jina.ai/v1/embeddings"
+JINA_HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {JINA_API_KEY}"
+}
+JINA_MODEL = "jina-embeddings-v3"
+JINA_TASK  = "retrieval.passage"
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
-    """
-    Embed a list of texts into vectors.
-    Returns a list of list-of-floats (batch_size x 1536).
-    """
-    # encode defaults to convert_to_numpy=True, returning a numpy array
-    embeddings = _model.encode(texts)
-    # convert to plain Python lists
-    return embeddings.tolist()
+    payload = {
+        "model": "jina-embeddings-v3",
+        "task": "retrieval.passage",
+        "input": texts,
+    }
+    resp = requests.post(JINA_URL, headers=JINA_HEADERS, json=payload, timeout=30)
+    resp.raise_for_status()
+    body = resp.json()
+
+    if "data" in body and isinstance(body["data"], list):
+        embeddings = []
+        for item in body["data"]:
+            if not isinstance(item, dict) or "embedding" not in item:
+                raise RuntimeError(f"Unexpected item in Jina response: {item}")
+            embeddings.append(item["embedding"])
+        return embeddings
+
+    if "embeddings" in body and isinstance(body["embeddings"], list):
+        return body["embeddings"]
+
+    raise RuntimeError(f"Unexpected Jina response format: {body}")
