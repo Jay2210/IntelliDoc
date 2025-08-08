@@ -9,7 +9,7 @@ def retrieve(
     top_k: int = 50,
     insurer: str = None
 ) -> List[Dict]:
-    vectors = embed_texts([query])
+    vectors = embed_texts([query], task="retrieval.passage")
     if not vectors:
         return []
     q_vec = [float(x) for x in vectors[0]]

@@ -14,10 +14,10 @@ JINA_HEADERS = {
 JINA_MODEL = "jina-embeddings-v3"
 JINA_TASK  = "retrieval.passage"
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
+def embed_texts(texts: List[str], task: str) -> List[List[float]]:
     payload = {
         "model": "jina-embeddings-v3",
-        "task": "retrieval.passage",
+        "task": task,
         "input": texts,
     }
     resp = requests.post(JINA_URL, headers=JINA_HEADERS, json=payload, timeout=30)

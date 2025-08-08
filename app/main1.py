@@ -66,7 +66,7 @@ async def run(req: MultiQuestionRequest = Body(
     request_id = uuid4().hex
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(req.documents, follow_redirects=True)
             r.raise_for_status()
         pdf_bytes = r.content
@@ -89,7 +89,7 @@ async def run(req: MultiQuestionRequest = Body(
         text   = await asyncio.to_thread(load_document, Path(tmpf.name))
         chunks = await asyncio.to_thread(chunk_text, text)
 
-    vectors = await asyncio.to_thread(embed_texts, chunks)
+    vectors = await asyncio.to_thread(embed_texts, chunks, task="retrieval.passage")
     idx     = get_index()
     
     try:
@@ -98,7 +98,8 @@ async def run(req: MultiQuestionRequest = Body(
     except Exception as e:
         logger.warning(f"Could not get initial index stats: {e}. Defaulting count to 0.")
         initial_vector_count = 0
-    
+
+    # 2. Upsert the new vectors
     batch   = [
         (f"{request_id}-{i}", vec, {"source": s3_key, "insurer": request_id, "text": chunk})
         for i, (vec, chunk) in enumerate(zip(vectors, chunks))
@@ -106,35 +107,57 @@ async def run(req: MultiQuestionRequest = Body(
     await asyncio.to_thread(idx.upsert, vectors=batch)
     logger.info(f"[{request_id}] upserted {len(batch)} chunks")
 
+    # 3. Poll the index until the vector count is updated
+    expected_count = initial_vector_count + len(batch)
+    timeout_seconds = 5
+    start_time = time.monotonic()
+    
+    logger.info(f"[{request_id}] Waiting for index to update to {expected_count} vectors...")
+    
+    while (time.monotonic() - start_time) < timeout_seconds:
+        try:
+            stats = await asyncio.to_thread(idx.describe_index_stats)
+            current_count = stats.get("total_vector_count", 0)
+            if current_count >= expected_count:
+                logger.info(f"[{request_id}] Index is ready with {current_count} vectors.")
+                break
+            else:
+                logger.info(f"[{request_id}] Current vector count: {current_count}. Waiting...")
+        except Exception as e:
+            logger.warning(f"Polling failed with error: {e}. Retrying...")
+
+        await asyncio.sleep(1.5) # Wait before the next check
+    else: # This runs if the while loop finishes without a 'break'
+        logger.warning(f"[{request_id}] Index update timed out after {timeout_seconds}s. Proceeding anyway.")
+
     sem = asyncio.Semaphore(2)
 
     async def answer_one(q: str) -> str:
         async with sem:
-            ctxs = await asyncio.to_thread(retrieve, q, 10, request_id)
+            ctxs = await asyncio.to_thread(retrieve, q, 5, request_id)
             context_str = "\n---\n".join(f"{c['source']}: {c['text']}…" for c in ctxs)
 
         prompt = f"""
-                You are a meticulous and detail-oriented insurance policy analyst. Your task is to answer the user's question with maximum precision and completeness, based *only* on the provided context snippets.
+You are a highly precise question-answering assistant. The context snippets may come from insurance policies, constitutions, books, or any other document. Answer the user’s question **only** using the information in these snippets.
 
-                Follow these instructions exactly:
-                1.  **Analyze the Context:** Carefully read all the provided context snippets to find the most relevant clauses that answer the user's question.
-                2.  **Extract All Details:** From the relevant clauses, you must extract every key detail. Pay close attention to the following, and list them if they are present:
-                * **Conditions and Eligibility:** What are the specific requirements, waiting periods, age limits, or pre-requisites?
-                * **Limits and Sub-limits:** Are there any monetary caps, percentage-based limits, or limits on frequency (e.g., "up to 2 deliveries")?
-                * **Specific Criteria:** For definitions (like "Hospital"), what are all the specific criteria listed (e.g., bed count, staff requirements, facilities)?
-                * **Type of Coverage:** Is the coverage for "in-patient," "out-patient," "day care," etc.?
-                3.  **Synthesize the Answer:**
-                * Start with a direct, one-sentence answer (e.g., "Yes, this is covered," "No, this is excluded," "The waiting period is X months.").
-                * Answer should be at max 2 lines. 1st Line should have the answer yes/no and the duration or any other important detail. 2nd Line should have details if necessary.
-                * Do no formatting, just plain text. Keep the answer concise and to the point. The answer should be short and to the point, ideally no more than 2 lines.
-                * If the answer is "No," explain why it is not covered or what the limitations
-                4.  **Handle Missing Information:** If a specific detail is not mentioned in the context, you must explicitly state that (e.g., "* The context does not specify the maximum number of deliveries.").
+Instructions:
+1. Read all CONTEXT snippets and identify the single most relevant passage.
+2. Extract every key detail you need to answer:
+   - If it’s a policy: conditions, waiting periods, limits/sub-limits, definitions, coverage type.
+   - If it’s legal text or a book: factual assertions, definitions, dates, names, or any explicit statement.
+3. Compose your answer in **at most two sentences**:
+   - **Sentence 1:** Directly answer the question (Yes/No or factual statement).
+   - **Sentence 2 (if needed):** Qualifying details or elaboration.
+   - When you mention durations or amounts, include both word and numeric forms (e.g. “thirty-six (36) months”).
+   - Do **not** use lists, bullets, or formatting—just plain text.
+4. **Missing details:** If the context does **not** contain a required piece of information, say  
+   “The context does not specify the <detail>.”
 
-                ---
-                CONTEXT:
-                {context_str}
-                ---
-                QUESTION: {q}
+---
+CONTEXT:
+{context_str}
+---
+QUESTION: {q}
 
 ANSWER:
 """
